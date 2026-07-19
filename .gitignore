@@ -13,5 +13,4 @@ models/
 artifacts/
 
 # Files
-answer.csv
 *.py[cod]
