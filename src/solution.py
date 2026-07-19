@@ -6,6 +6,7 @@ from retrieval import (
     dense_query_similarity,
     fold_dense_memory_scores,
     fold_memory_scores,
+    high_score_retrieval_scores,
     hybrid_retrieval_scores,
     leave_one_out_dense_memory_scores,
     leave_one_out_memory_scores,
@@ -16,6 +17,7 @@ from retrieval import (
     parse_ground_truth,
     prepare_articles,
     qwen_embedding_channels,
+    qwen_reranker_scores,
     rank_article_ids,
 )
 
@@ -57,6 +59,12 @@ def evaluate_calibration() -> None:
         rankings = rank_article_ids(scores, article_ids)
         value = mean_average_precision_at_10(rankings, ground_truth)
         print(f"{name}: {value:.6f}")
+
+    reranker = qwen_reranker_scores(articles, queries, fusion)
+    high_score = high_score_retrieval_scores(fusion, reranker)
+    high_score_rankings = rank_article_ids(high_score, article_ids)
+    high_score_map = mean_average_precision_at_10(high_score_rankings, ground_truth)
+    print(f"high_score: {high_score_map:.6f}")
 
     for seed in config.OOF_SEEDS:
         fold_memory = fold_memory_scores(similarity, labels, seed)

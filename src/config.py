@@ -103,3 +103,26 @@ FUSION_DIRECT_WEIGHT: Final[float] = 0.35
 FUSION_DENSE_MEMORY_WEIGHT: Final[float] = 0.45
 FUSION_LEXICAL_MEMORY_WEIGHT: Final[float] = 0.05
 FUSION_CLASSIFIER_WEIGHT: Final[float] = 0.15
+
+# Параметры Qwen reranker
+RERANKER_MODEL: Final[str] = "Qwen/Qwen3-Reranker-0.6B"
+RERANKER_REVISION: Final[str] = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+RERANKER_ARTIFACT: Final[Path] = Path("artifacts/qwen3_reranker_calibration.npz")
+RERANKER_BATCH_SIZE: Final[int] = 16
+RERANKER_MAX_LENGTH: Final[int] = 256
+RERANKER_CANDIDATES: Final[int] = 15
+RERANKER_CHUNK_SIZE: Final[int] = 120
+RERANKER_CHUNK_OVERLAP: Final[int] = 30
+RERANKER_CHAR_MAX_FEATURES: Final[int] = 300_000
+RERANKER_CACHE_VERSION: Final[int] = 1
+RERANKER_TASK: Final[str] = (
+    "Given a Russian Avito customer support question, determine whether this "
+    "Help Center passage is required to resolve it. More than one passage may "
+    "be relevant."
+)
+
+# Веса выбора фрагментов и финального ранжирования
+CHUNK_WORD_WEIGHT: Final[float] = 0.4
+CHUNK_CHAR_WEIGHT: Final[float] = 0.6
+HIGH_SCORE_BASE_WEIGHT: Final[float] = 0.84
+HIGH_SCORE_RERANKER_WEIGHT: Final[float] = 0.16

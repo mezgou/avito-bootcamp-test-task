@@ -12,7 +12,7 @@ import pyarrow as pa
 import torch
 from bs4 import BeautifulSoup
 from scipy.sparse import csr_matrix, hstack
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import KFold
@@ -842,3 +842,258 @@ def hybrid_retrieval_scores(
     )
 
     return row_scale(scores)
+
+
+def reranker_candidate_indices(
+    scores: np.ndarray,
+    count: int = config.RERANKER_CANDIDATES,
+) -> np.ndarray:
+    """Выбирает упорядоченные позиции кандидатов для reranker"""
+    candidates = np.argpartition(-scores, count - 1, axis=1)[:, :count]
+    candidate_scores = np.take_along_axis(scores, candidates, axis=1)
+    order = np.argsort(-candidate_scores, axis=1)
+
+    return np.take_along_axis(candidates, order, axis=1)
+
+
+def reranker_chunks(articles: pd.DataFrame) -> tuple[list[str], np.ndarray]:
+    """Разбивает статьи на фрагменты для reranker"""
+    texts: list[str] = []
+    owners: list[int] = []
+    step = config.RERANKER_CHUNK_SIZE - config.RERANKER_CHUNK_OVERLAP
+    rows = articles[["title", "body"]].itertuples(index=False, name=None)
+
+    for owner, (title, body) in enumerate(rows):
+        words = html_to_dense_text(body).split()
+        starts = range(0, max(len(words), 1), step)
+
+        for start in starts:
+            chunk = " ".join(words[start : start + config.RERANKER_CHUNK_SIZE])
+            texts.append(f"{title}\n{chunk}")
+            owners.append(owner)
+
+    return texts, np.asarray(owners, dtype=np.int64)
+
+
+def select_candidate_passages(
+    articles: pd.DataFrame,
+    queries: pd.Series,
+    candidates: np.ndarray,
+) -> list[str]:
+    """Выбирает наиболее подходящий фрагмент каждого кандидата"""
+    chunks, owners = reranker_chunks(articles)
+    clean_chunks = pd.Series(chunks).map(normalize_lexical_text)
+    clean_queries = queries.map(normalize_lexical_text)
+    word_vectorizer = TfidfVectorizer(
+        ngram_range=config.WORD_NGRAM_RANGE,
+        min_df=config.WORD_MIN_DF,
+        sublinear_tf=True,
+        dtype=np.float32,
+        token_pattern=config.WORD_TOKEN_PATTERN,
+    )
+    char_vectorizer = TfidfVectorizer(
+        analyzer=config.CHAR_ANALYZER,
+        ngram_range=config.CHAR_NGRAM_RANGE,
+        min_df=config.BODY_CHAR_MIN_DF,
+        max_features=config.RERANKER_CHAR_MAX_FEATURES,
+        sublinear_tf=True,
+        dtype=np.float32,
+    )
+    word_chunks = word_vectorizer.fit_transform(clean_chunks)
+    char_chunks = char_vectorizer.fit_transform(clean_chunks)
+    word_scores = (word_vectorizer.transform(clean_queries) @ word_chunks.T).toarray()
+    char_scores = (char_vectorizer.transform(clean_queries) @ char_chunks.T).toarray()
+    selection_scores = (
+        config.CHUNK_WORD_WEIGHT * word_scores + config.CHUNK_CHAR_WEIGHT * char_scores
+    )
+    owner_chunks = {
+        int(owner): np.flatnonzero(owners == owner) for owner in np.unique(owners)
+    }
+    selected: list[str] = []
+
+    for query_row, row_candidates in enumerate(candidates):
+        for candidate in row_candidates:
+            indexes = owner_chunks[int(candidate)]
+            best = indexes[np.argmax(selection_scores[query_row, indexes])]
+            selected.append(chunks[int(best)])
+
+    return selected
+
+
+def reranker_fingerprint(
+    articles: pd.DataFrame,
+    queries: pd.Series,
+    device: str,
+) -> str:
+    """Вычисляет отпечаток данных и настроек reranker"""
+    digest = hashlib.sha256()
+    settings = (
+        str(config.RERANKER_CACHE_VERSION),
+        config.RERANKER_MODEL,
+        config.RERANKER_REVISION,
+        str(config.RERANKER_MAX_LENGTH),
+        str(config.RERANKER_CHUNK_SIZE),
+        str(config.RERANKER_CHUNK_OVERLAP),
+        str(config.WORD_NGRAM_RANGE),
+        str(config.CHAR_NGRAM_RANGE),
+        str(config.WORD_MIN_DF),
+        str(config.BODY_CHAR_MIN_DF),
+        str(config.RERANKER_CHAR_MAX_FEATURES),
+        str(config.CHUNK_WORD_WEIGHT),
+        str(config.CHUNK_CHAR_WEIGHT),
+        config.LEXICAL_TOKEN_PATTERN.pattern,
+        config.RERANKER_TASK,
+        device,
+    )
+    article_values = (
+        f"{article_id}\n{title}\n{body}"
+        for article_id, title, body in articles[
+            ["article_id", "title", "body"]
+        ].itertuples(index=False, name=None)
+    )
+
+    for values in (settings, article_values, queries.tolist()):
+        for value in values:
+            encoded = str(value).encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "little"))
+            digest.update(encoded)
+
+    return digest.hexdigest()
+
+
+def _load_reusable_reranker_logits(
+    path: Path,
+    fingerprint: str,
+    candidates: np.ndarray,
+) -> np.ndarray:
+    """Переносит закэшированные logits общих кандидатов"""
+    logits = np.full(candidates.shape, np.nan, dtype=np.float32)
+    if not path.exists():
+        return logits
+
+    with np.load(path, allow_pickle=False) as stored:
+        required = {"fingerprint", "candidates", "logits"}
+        if not required.issubset(stored.files):
+            return logits
+
+        cached_candidates = stored["candidates"]
+        cached_logits = stored["logits"]
+        valid = (
+            str(stored["fingerprint"].item()) == fingerprint
+            and cached_candidates.shape == cached_logits.shape
+            and cached_candidates.shape[0] == candidates.shape[0]
+            and np.isfinite(cached_logits).all()
+        )
+        if not valid:
+            return logits
+
+    for row, row_candidates in enumerate(candidates):
+        cached = {
+            int(candidate): float(logit)
+            for candidate, logit in zip(
+                cached_candidates[row],
+                cached_logits[row],
+                strict=True,
+            )
+        }
+
+        for position, candidate in enumerate(row_candidates):
+            if int(candidate) in cached:
+                logits[row, position] = cached[int(candidate)]
+
+    return logits
+
+
+def reranker_minmax_scores(
+    candidates: np.ndarray,
+    logits: np.ndarray,
+    width: int,
+) -> np.ndarray:
+    """Масштабирует logits reranker внутри списка кандидатов"""
+    minimum = logits.min(axis=1, keepdims=True)
+    scale = np.maximum(
+        logits.max(axis=1, keepdims=True) - minimum,
+        config.SCORE_EPSILON,
+    )
+    normalized = (logits - minimum) / scale
+    scores = np.zeros((len(candidates), width), dtype=np.float32)
+
+    for row, row_candidates in enumerate(candidates):
+        scores[row, row_candidates] = normalized[row]
+
+    return scores
+
+
+def qwen_reranker_scores(
+    articles: pd.DataFrame,
+    queries: pd.Series,
+    base_scores: np.ndarray,
+    artifact_path: str | Path = config.RERANKER_ARTIFACT,
+    cache_dir: str | Path = config.MODEL_CACHE_DIR,
+    device: str = config.DEFAULT_DEVICE,
+    batch_size: int = config.RERANKER_BATCH_SIZE,
+) -> np.ndarray:
+    """Оценивает top-кандидатов Qwen reranker и кэширует logits"""
+    actual_device = (
+        device if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
+    )
+    candidates = reranker_candidate_indices(base_scores)
+    fingerprint = reranker_fingerprint(articles, queries, actual_device)
+    artifact = Path(artifact_path)
+    logits = _load_reusable_reranker_logits(artifact, fingerprint, candidates)
+    missing = np.flatnonzero(~np.isfinite(logits.ravel()))
+
+    if len(missing):
+        passages = select_candidate_passages(articles, queries, candidates)
+        repeated_queries = [
+            str(query) for query in queries for _ in range(config.RERANKER_CANDIDATES)
+        ]
+        pairs = [(repeated_queries[index], passages[index]) for index in missing]
+        model_kwargs: dict[str, object] = {"attn_implementation": "sdpa"}
+        if actual_device.startswith("cuda"):
+            model_kwargs["torch_dtype"] = torch.float16
+
+        model = CrossEncoder(
+            config.RERANKER_MODEL,
+            revision=config.RERANKER_REVISION,
+            device=actual_device,
+            cache_folder=str(cache_dir),
+            max_length=config.RERANKER_MAX_LENGTH,
+            model_kwargs=model_kwargs,
+            processor_kwargs={"padding_side": "left"},
+        )
+        predictions = model.predict(
+            pairs,
+            prompt=config.RERANKER_TASK,
+            batch_size=batch_size,
+            show_progress_bar=True,
+        )
+        logits.ravel()[missing] = np.asarray(predictions, dtype=np.float32)
+
+        del model
+        gc.collect()
+        if actual_device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        temporary = artifact.with_name(f"{artifact.stem}.tmp.npz")
+        np.savez_compressed(
+            temporary,
+            fingerprint=np.array(fingerprint),
+            candidates=candidates,
+            logits=logits,
+        )
+        temporary.replace(artifact)
+
+    return reranker_minmax_scores(candidates, logits, base_scores.shape[1])
+
+
+def high_score_retrieval_scores(
+    base_scores: np.ndarray,
+    reranker_scores: np.ndarray,
+) -> np.ndarray:
+    """Добавляет оценки reranker к базовому ранжированию"""
+    return (
+        config.HIGH_SCORE_BASE_WEIGHT * base_scores
+        + config.HIGH_SCORE_RERANKER_WEIGHT * reranker_scores
+    )
