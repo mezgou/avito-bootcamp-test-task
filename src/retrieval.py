@@ -1,4 +1,7 @@
+import gc
+import hashlib
 import unicodedata
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote
@@ -6,8 +9,10 @@ from urllib.parse import unquote
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import torch
 from bs4 import BeautifulSoup
 from scipy.sparse import csr_matrix, hstack
+from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import KFold
@@ -544,3 +549,296 @@ def logistic_oof_scores(
         )
 
     return scores
+
+
+def embedding_fingerprint(
+    article_ids: Sequence[int],
+    passages: Sequence[str],
+    reference_queries: Sequence[str],
+    target_queries: Sequence[str],
+    device: str,
+) -> str:
+    """Вычисляет отпечаток входов и настроек embeddings"""
+    digest = hashlib.sha256()
+    settings = (
+        str(config.EMBEDDING_CACHE_VERSION),
+        config.EMBEDDING_MODEL,
+        config.EMBEDDING_REVISION,
+        str(config.EMBEDDING_MAX_LENGTH),
+        str(config.EMBEDDING_PASSAGE_CHARACTERS),
+        config.ARTICLE_QUERY_TASK,
+        config.MEMORY_QUERY_TASK,
+        device,
+    )
+    identifiers = tuple(str(int(article_id)) for article_id in article_ids)
+
+    for values in (
+        settings,
+        identifiers,
+        passages,
+        reference_queries,
+        target_queries,
+    ):
+        for value in values:
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "little"))
+            digest.update(encoded)
+
+    return digest.hexdigest()
+
+
+def article_passages(articles: pd.DataFrame) -> list[str]:
+    """Формирует тексты статей для dense поиска"""
+    rows = articles[["title", "body"]].itertuples(
+        index=False,
+        name=None,
+    )
+
+    return [
+        f"{title}\n{html_to_dense_text(body)[: config.EMBEDDING_PASSAGE_CHARACTERS]}"
+        for title, body in rows
+    ]
+
+
+def html_to_dense_text(value: str) -> str:
+    """Извлекает непрерывный текст статьи для embeddings"""
+    soup = BeautifulSoup(value, "lxml")
+
+    for element in soup.find_all(config.REMOVED_TAGS):
+        element.decompose()
+
+    return soup.get_text(" ", strip=True)
+
+
+def instructed_queries(queries: Sequence[str], task: str) -> list[str]:
+    """Добавляет retrieval-инструкцию к запросам"""
+    return [f"Instruct: {task}\nQuery: {query}" for query in queries]
+
+
+def encode_embeddings(
+    model: SentenceTransformer,
+    texts: Sequence[str],
+    batch_size: int,
+) -> np.ndarray:
+    """Кодирует тексты в нормализованные embeddings"""
+    embeddings = model.encode(
+        list(texts),
+        batch_size=batch_size,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+
+    return embeddings.astype(np.float32)
+
+
+def _load_embedding_cache(
+    path: Path,
+    fingerprint: str,
+    expected_rows: dict[str, int],
+) -> dict[str, np.ndarray] | None:
+    """Загружает embeddings при совпадении отпечатка"""
+    if not path.exists():
+        return None
+
+    with np.load(path, allow_pickle=False) as stored:
+        required = {
+            "fingerprint",
+            "passages",
+            "reference_queries",
+            "article_queries",
+            "memory_queries",
+        }
+        if not required.issubset(stored.files):
+            return None
+
+        if str(stored["fingerprint"].item()) != fingerprint:
+            return None
+
+        channels = {name: stored[name] for name in required if name != "fingerprint"}
+
+    widths = {channel.shape[1] for channel in channels.values() if channel.ndim == 2}
+    valid = (
+        widths == {config.EMBEDDING_DIMENSION}
+        and all(
+            channel.ndim == 2
+            and channel.shape[0] == expected_rows[name]
+            and np.isfinite(channel).all()
+            for name, channel in channels.items()
+        )
+        and all(
+            np.allclose(np.linalg.norm(channel, axis=1), 1.0, atol=1e-3)
+            for channel in channels.values()
+        )
+    )
+
+    return channels if valid else None
+
+
+def qwen_embedding_channels(
+    articles: pd.DataFrame,
+    reference_queries: pd.Series,
+    target_queries: pd.Series,
+    artifact_path: str | Path = config.EMBEDDING_ARTIFACT,
+    cache_dir: str | Path = config.MODEL_CACHE_DIR,
+    device: str = config.DEFAULT_DEVICE,
+    batch_size: int = config.EMBEDDING_BATCH_SIZE,
+) -> dict[str, np.ndarray]:
+    """Строит и кэширует Qwen embeddings для retrieval"""
+    passages = article_passages(articles)
+    references = reference_queries.tolist()
+    targets = target_queries.tolist()
+    actual_device = (
+        device if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
+    )
+    fingerprint = embedding_fingerprint(
+        articles["article_id"].tolist(),
+        passages,
+        references,
+        targets,
+        actual_device,
+    )
+    artifact = Path(artifact_path)
+    expected_rows = {
+        "passages": len(passages),
+        "reference_queries": len(references),
+        "article_queries": len(targets),
+        "memory_queries": len(targets),
+    }
+    cached = _load_embedding_cache(artifact, fingerprint, expected_rows)
+
+    if cached is not None:
+        return cached
+
+    model_kwargs: dict[str, object] = {"attn_implementation": "sdpa"}
+    if actual_device.startswith("cuda"):
+        model_kwargs["torch_dtype"] = torch.float16
+
+    model = SentenceTransformer(
+        config.EMBEDDING_MODEL,
+        revision=config.EMBEDDING_REVISION,
+        device=actual_device,
+        cache_folder=str(cache_dir),
+        model_kwargs=model_kwargs,
+        processor_kwargs={"padding_side": "left"},
+    )
+    model.max_seq_length = config.EMBEDDING_MAX_LENGTH
+    channels = {
+        "passages": encode_embeddings(model, passages, batch_size),
+        "reference_queries": encode_embeddings(model, references, batch_size),
+        "article_queries": encode_embeddings(
+            model,
+            instructed_queries(targets, config.ARTICLE_QUERY_TASK),
+            batch_size,
+        ),
+        "memory_queries": encode_embeddings(
+            model,
+            instructed_queries(targets, config.MEMORY_QUERY_TASK),
+            batch_size,
+        ),
+    }
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    temporary = artifact.with_name(f"{artifact.stem}.tmp.npz")
+    np.savez_compressed(temporary, fingerprint=np.array(fingerprint), **channels)
+    temporary.replace(artifact)
+
+    del model
+    gc.collect()
+    if actual_device.startswith("cuda"):
+        torch.cuda.empty_cache()
+
+    return channels
+
+
+def dense_article_scores(channels: dict[str, np.ndarray]) -> np.ndarray:
+    """Вычисляет dense оценки статей"""
+    return row_scale(channels["article_queries"] @ channels["passages"].T)
+
+
+def dense_query_similarity(channels: dict[str, np.ndarray]) -> np.ndarray:
+    """Вычисляет сходство с размеченными запросами"""
+    return channels["memory_queries"] @ channels["reference_queries"].T
+
+
+def dense_memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+    train_rows: np.ndarray,
+    target_rows: np.ndarray,
+) -> np.ndarray:
+    """Переносит ответы по сходству Qwen embeddings"""
+    return memory_scores(
+        similarity,
+        labels,
+        train_rows,
+        target_rows,
+        power=config.DENSE_MEMORY_POWER,
+        threshold=config.DENSE_MEMORY_THRESHOLD,
+        frequency_power=config.DENSE_MEMORY_FREQUENCY_POWER,
+    )
+
+
+def leave_one_out_dense_memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+) -> np.ndarray:
+    """Вычисляет Qwen query memory со строгим LOO"""
+    scores = np.zeros_like(labels)
+    all_rows = np.arange(len(labels))
+
+    for row in all_rows:
+        train_rows = np.delete(all_rows, row)
+        scores[row] = dense_memory_scores(
+            similarity,
+            labels,
+            train_rows,
+            np.array([row]),
+        )[0]
+
+    return scores
+
+
+def fold_dense_memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Вычисляет Qwen query memory по OOF-разбиениям"""
+    scores = np.zeros_like(labels)
+    splitter = KFold(
+        n_splits=config.OOF_SPLITS,
+        shuffle=True,
+        random_state=seed,
+    )
+
+    for train_rows, target_rows in splitter.split(labels):
+        scores[target_rows] = dense_memory_scores(
+            similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+
+    return scores
+
+
+def hybrid_retrieval_scores(
+    lexical_direct: np.ndarray,
+    dense_direct: np.ndarray,
+    dense_memory: np.ndarray,
+    lexical_memory: np.ndarray,
+    classifier: np.ndarray,
+) -> np.ndarray:
+    """Объединяет lexical, dense и calibration оценки"""
+    direct = row_scale(
+        config.DIRECT_LEXICAL_WEIGHT * lexical_direct
+        + config.DIRECT_DENSE_WEIGHT * dense_direct
+    )
+    scores = (
+        config.FUSION_DIRECT_WEIGHT * direct
+        + config.FUSION_DENSE_MEMORY_WEIGHT * dense_memory
+        + config.FUSION_LEXICAL_MEMORY_WEIGHT * lexical_memory
+        + config.FUSION_CLASSIFIER_WEIGHT * classifier
+    )
+
+    return row_scale(scores)

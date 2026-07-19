@@ -70,3 +70,36 @@ CLASSIFIER_MAX_ITERATIONS: Final[int] = 2000
 CLASSIFIER_PRIOR_WEIGHT: Final[float] = 0.1
 OOF_SPLITS: Final[int] = 5
 OOF_SEEDS: Final[tuple[int, int, int]] = (7, 42, 2026)
+
+# Параметры Qwen embeddings
+EMBEDDING_MODEL: Final[str] = "Qwen/Qwen3-Embedding-0.6B"
+EMBEDDING_REVISION: Final[str] = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+EMBEDDING_ARTIFACT: Final[Path] = Path("artifacts/qwen3_calibration_embeddings.npz")
+MODEL_CACHE_DIR: Final[Path] = Path("models")
+EMBEDDING_BATCH_SIZE: Final[int] = 4
+EMBEDDING_MAX_LENGTH: Final[int] = 512
+EMBEDDING_DIMENSION: Final[int] = 1024
+EMBEDDING_PASSAGE_CHARACTERS: Final[int] = 6000
+EMBEDDING_CACHE_VERSION: Final[int] = 1
+DEFAULT_DEVICE: Final[str] = "cuda"
+ARTICLE_QUERY_TASK: Final[str] = (
+    "Given a Russian Avito customer support question, retrieve all Help Center "
+    "articles required to resolve it. More than one article may be relevant."
+)
+MEMORY_QUERY_TASK: Final[str] = (
+    "Given a Russian Avito customer support question, retrieve other support "
+    "questions that require the same Help Center articles."
+)
+
+# Параметры Qwen query memory
+DENSE_MEMORY_POWER: Final[float] = 3.0
+DENSE_MEMORY_THRESHOLD: Final[float] = 0.4
+DENSE_MEMORY_FREQUENCY_POWER: Final[float] = 0.25
+
+# Веса быстрого гибридного поиска
+DIRECT_LEXICAL_WEIGHT: Final[float] = 0.15
+DIRECT_DENSE_WEIGHT: Final[float] = 0.85
+FUSION_DIRECT_WEIGHT: Final[float] = 0.35
+FUSION_DENSE_MEMORY_WEIGHT: Final[float] = 0.45
+FUSION_LEXICAL_MEMORY_WEIGHT: Final[float] = 0.05
+FUSION_CLASSIFIER_WEIGHT: Final[float] = 0.15
