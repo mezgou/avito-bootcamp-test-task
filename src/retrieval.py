@@ -1,7 +1,7 @@
 import gc
 import hashlib
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote
@@ -551,15 +551,27 @@ def logistic_oof_scores(
     return scores
 
 
-def embedding_fingerprint(
+def cache_key(groups: Iterable[Iterable[object]]) -> str:
+    """Строит ключ кэша из входных значений"""
+    digest = hashlib.blake2b(digest_size=config.CACHE_KEY_SIZE)
+
+    for values in groups:
+        for value in values:
+            encoded = str(value).encode("utf-8")
+            digest.update(len(encoded).to_bytes(config.CACHE_LENGTH_BYTES, "little"))
+            digest.update(encoded)
+
+    return digest.hexdigest()
+
+
+def embedding_cache_key(
     article_ids: Sequence[int],
     passages: Sequence[str],
     reference_queries: Sequence[str],
     target_queries: Sequence[str],
     device: str,
 ) -> str:
-    """Вычисляет отпечаток входов и настроек embeddings"""
-    digest = hashlib.sha256()
+    """Строит ключ кэша для embeddings"""
     settings = (
         str(config.EMBEDDING_CACHE_VERSION),
         config.EMBEDDING_MODEL,
@@ -572,19 +584,15 @@ def embedding_fingerprint(
     )
     identifiers = tuple(str(int(article_id)) for article_id in article_ids)
 
-    for values in (
-        settings,
-        identifiers,
-        passages,
-        reference_queries,
-        target_queries,
-    ):
-        for value in values:
-            encoded = value.encode("utf-8")
-            digest.update(len(encoded).to_bytes(8, "little"))
-            digest.update(encoded)
-
-    return digest.hexdigest()
+    return cache_key(
+        (
+            settings,
+            identifiers,
+            passages,
+            reference_queries,
+            target_queries,
+        )
+    )
 
 
 def article_passages(articles: pd.DataFrame) -> list[str]:
@@ -634,16 +642,16 @@ def encode_embeddings(
 
 def _load_embedding_cache(
     path: Path,
-    fingerprint: str,
+    key: str,
     expected_rows: dict[str, int],
 ) -> dict[str, np.ndarray] | None:
-    """Загружает embeddings при совпадении отпечатка"""
+    """Загружает embeddings при совпадении ключа кэша"""
     if not path.exists():
         return None
 
     with np.load(path, allow_pickle=False) as stored:
         required = {
-            "fingerprint",
+            "cache_key",
             "passages",
             "reference_queries",
             "article_queries",
@@ -652,10 +660,10 @@ def _load_embedding_cache(
         if not required.issubset(stored.files):
             return None
 
-        if str(stored["fingerprint"].item()) != fingerprint:
+        if str(stored["cache_key"].item()) != key:
             return None
 
-        channels = {name: stored[name] for name in required if name != "fingerprint"}
+        channels = {name: stored[name] for name in required if name != "cache_key"}
 
     widths = {channel.shape[1] for channel in channels.values() if channel.ndim == 2}
     valid = (
@@ -691,7 +699,7 @@ def qwen_embedding_channels(
     actual_device = (
         device if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
     )
-    fingerprint = embedding_fingerprint(
+    key = embedding_cache_key(
         articles["article_id"].tolist(),
         passages,
         references,
@@ -705,7 +713,7 @@ def qwen_embedding_channels(
         "article_queries": len(targets),
         "memory_queries": len(targets),
     }
-    cached = _load_embedding_cache(artifact, fingerprint, expected_rows)
+    cached = _load_embedding_cache(artifact, key, expected_rows)
 
     if cached is not None:
         return cached
@@ -739,7 +747,7 @@ def qwen_embedding_channels(
     }
     artifact.parent.mkdir(parents=True, exist_ok=True)
     temporary = artifact.with_name(f"{artifact.stem}.tmp.npz")
-    np.savez_compressed(temporary, fingerprint=np.array(fingerprint), **channels)
+    np.savez_compressed(temporary, cache_key=np.array(key), **channels)
     temporary.replace(artifact)
 
     del model
@@ -775,6 +783,25 @@ def dense_memory_scores(
         power=config.DENSE_MEMORY_POWER,
         threshold=config.DENSE_MEMORY_THRESHOLD,
         frequency_power=config.DENSE_MEMORY_FREQUENCY_POWER,
+    )
+
+
+def robust_dense_memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+    train_rows: np.ndarray,
+    target_rows: np.ndarray,
+) -> np.ndarray:
+    """Переносит ответы с устойчивыми параметрами Qwen memory"""
+    return memory_scores(
+        similarity,
+        labels,
+        train_rows,
+        target_rows,
+        neighbors=config.ROBUST_MEMORY_NEIGHBORS,
+        power=config.ROBUST_MEMORY_POWER,
+        threshold=config.ROBUST_MEMORY_THRESHOLD,
+        frequency_power=config.ROBUST_MEMORY_FREQUENCY_POWER,
     )
 
 
@@ -842,6 +869,84 @@ def hybrid_retrieval_scores(
     )
 
     return row_scale(scores)
+
+
+def robust_retrieval_scores(
+    lexical_direct: np.ndarray,
+    dense_direct: np.ndarray,
+    dense_memory: np.ndarray,
+    lexical_memory: np.ndarray,
+    classifier: np.ndarray,
+    dense_similarity: np.ndarray,
+    labels: np.ndarray,
+    train_rows: np.ndarray,
+    target_rows: np.ndarray,
+) -> np.ndarray:
+    """Ослабляет query memory для непохожих и новых запросов"""
+    direct = row_scale(
+        config.DIRECT_LEXICAL_WEIGHT * lexical_direct
+        + config.DIRECT_DENSE_WEIGHT * dense_direct
+    )
+    similarity = dense_similarity[np.ix_(target_rows, train_rows)]
+    confidence = np.clip(
+        (similarity.max(axis=1) - config.ROBUST_GATE_START) / config.ROBUST_GATE_WIDTH,
+        0.0,
+        1.0,
+    )
+    scores = (
+        config.ROBUST_DIRECT_WEIGHT * direct
+        + config.ROBUST_MEMORY_WEIGHT * confidence[:, None] * dense_memory
+        + config.ROBUST_LEXICAL_MEMORY_WEIGHT * lexical_memory
+        + config.ROBUST_CLASSIFIER_WEIGHT * classifier
+    )
+
+    known_articles = labels[train_rows].sum(axis=0) > 0
+    unseen_queries = ~known_articles[direct.argmax(axis=1)]
+    scores[unseen_queries] += config.ROBUST_UNSEEN_SHIFT * (
+        direct[unseen_queries]
+        - confidence[unseen_queries, None] * dense_memory[unseen_queries]
+    )
+
+    return row_scale(scores)
+
+
+def fold_robust_retrieval_scores(
+    lexical_direct: np.ndarray,
+    dense_direct: np.ndarray,
+    lexical_memory: np.ndarray,
+    classifier: np.ndarray,
+    dense_similarity: np.ndarray,
+    labels: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Вычисляет устойчивый retrieval по OOF-разбиениям"""
+    scores = np.zeros_like(dense_direct)
+    splitter = KFold(
+        n_splits=config.OOF_SPLITS,
+        shuffle=True,
+        random_state=seed,
+    )
+
+    for train_rows, target_rows in splitter.split(labels):
+        dense_memory = robust_dense_memory_scores(
+            dense_similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+        scores[target_rows] = robust_retrieval_scores(
+            lexical_direct[target_rows],
+            dense_direct[target_rows],
+            dense_memory,
+            lexical_memory[target_rows],
+            classifier[target_rows],
+            dense_similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+
+    return scores
 
 
 def reranker_candidate_indices(
@@ -920,13 +1025,12 @@ def select_candidate_passages(
     return selected
 
 
-def reranker_fingerprint(
+def reranker_cache_key(
     articles: pd.DataFrame,
     queries: pd.Series,
     device: str,
 ) -> str:
-    """Вычисляет отпечаток данных и настроек reranker"""
-    digest = hashlib.sha256()
+    """Строит ключ кэша для reranker"""
     settings = (
         str(config.RERANKER_CACHE_VERSION),
         config.RERANKER_MODEL,
@@ -952,18 +1056,12 @@ def reranker_fingerprint(
         ].itertuples(index=False, name=None)
     )
 
-    for values in (settings, article_values, queries.tolist()):
-        for value in values:
-            encoded = str(value).encode("utf-8")
-            digest.update(len(encoded).to_bytes(8, "little"))
-            digest.update(encoded)
-
-    return digest.hexdigest()
+    return cache_key((settings, article_values, queries.tolist()))
 
 
 def _load_reusable_reranker_logits(
     path: Path,
-    fingerprint: str,
+    key: str,
     candidates: np.ndarray,
 ) -> np.ndarray:
     """Переносит закэшированные logits общих кандидатов"""
@@ -972,14 +1070,14 @@ def _load_reusable_reranker_logits(
         return logits
 
     with np.load(path, allow_pickle=False) as stored:
-        required = {"fingerprint", "candidates", "logits"}
+        required = {"cache_key", "candidates", "logits"}
         if not required.issubset(stored.files):
             return logits
 
         cached_candidates = stored["candidates"]
         cached_logits = stored["logits"]
         valid = (
-            str(stored["fingerprint"].item()) == fingerprint
+            str(stored["cache_key"].item()) == key
             and cached_candidates.shape == cached_logits.shape
             and cached_candidates.shape[0] == candidates.shape[0]
             and np.isfinite(cached_logits).all()
@@ -1038,9 +1136,9 @@ def qwen_reranker_scores(
         device if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
     )
     candidates = reranker_candidate_indices(base_scores)
-    fingerprint = reranker_fingerprint(articles, queries, actual_device)
+    key = reranker_cache_key(articles, queries, actual_device)
     artifact = Path(artifact_path)
-    logits = _load_reusable_reranker_logits(artifact, fingerprint, candidates)
+    logits = _load_reusable_reranker_logits(artifact, key, candidates)
     missing = np.flatnonzero(~np.isfinite(logits.ravel()))
 
     if len(missing):
@@ -1079,7 +1177,7 @@ def qwen_reranker_scores(
         temporary = artifact.with_name(f"{artifact.stem}.tmp.npz")
         np.savez_compressed(
             temporary,
-            fingerprint=np.array(fingerprint),
+            cache_key=np.array(key),
             candidates=candidates,
             logits=logits,
         )

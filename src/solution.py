@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +14,7 @@ from retrieval import (
     dense_query_similarity,
     fold_dense_memory_scores,
     fold_memory_scores,
+    fold_robust_retrieval_scores,
     high_score_retrieval_scores,
     hybrid_retrieval_scores,
     leave_one_out_dense_memory_scores,
@@ -29,6 +29,8 @@ from retrieval import (
     qwen_embedding_channels,
     qwen_reranker_scores,
     rank_article_ids,
+    robust_dense_memory_scores,
+    robust_retrieval_scores,
 )
 
 
@@ -90,6 +92,19 @@ def evaluate_calibration() -> None:
         value = mean_average_precision_at_10(rankings, ground_truth)
         print(f"fusion_seed_{seed}: {value:.6f}")
 
+        robust = fold_robust_retrieval_scores(
+            lexical_direct,
+            dense_direct,
+            fold_memory,
+            classifier_fold,
+            dense_similarity,
+            labels,
+            seed,
+        )
+        rankings = rank_article_ids(robust, article_ids)
+        value = mean_average_precision_at_10(rankings, ground_truth)
+        print(f"robust_seed_{seed}: {value:.6f}")
+
 
 def build_submission(
     data_dir: str | Path,
@@ -135,21 +150,42 @@ def build_submission(
         batch_size=batch_size,
     )
     dense_direct = dense_article_scores(embeddings)
-    dense_memory = dense_memory_scores(
-        dense_query_similarity(embeddings),
-        labels,
-        train_rows,
-        target_rows,
-    )
-    scores = hybrid_retrieval_scores(
-        lexical_direct,
-        dense_direct,
-        dense_memory,
-        lexical_memory,
-        classifier,
-    )
+    dense_similarity = dense_query_similarity(embeddings)
 
-    if mode == config.HIGH_SCORE_MODE:
+    if mode == config.ROBUST_MODE:
+        dense_memory = robust_dense_memory_scores(
+            dense_similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+        scores = robust_retrieval_scores(
+            lexical_direct,
+            dense_direct,
+            dense_memory,
+            lexical_memory,
+            classifier,
+            dense_similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+    else:
+        dense_memory = dense_memory_scores(
+            dense_similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+        scores = hybrid_retrieval_scores(
+            lexical_direct,
+            dense_direct,
+            dense_memory,
+            lexical_memory,
+            classifier,
+        )
+
+    if mode in (config.HIGH_SCORE_MODE, config.ROBUST_MODE):
         reranker = qwen_reranker_scores(
             articles,
             test_queries,
@@ -192,13 +228,11 @@ def validate_submission(
             raise ValueError("Ответ содержит неизвестный article_id")
 
 
-def save_submission(submission: pd.DataFrame, output: str | Path) -> str:
-    """Сохраняет CSV и возвращает его SHA-256"""
+def save_submission(submission: pd.DataFrame, output: str | Path) -> None:
+    """Сохраняет итоговый CSV-файл"""
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(path, index=False, lineterminator="\n")
-
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -225,9 +259,8 @@ def main() -> None:
         arguments.batch_size,
     )
     validate_submission(submission, test, article_ids)
-    digest = save_submission(submission, arguments.output)
+    save_submission(submission, arguments.output)
     print(f"Сохранено строк: {len(submission)}")
-    print(f"SHA-256: {digest}")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,10 @@ TEXT_TRANSLATION: Final[dict[int, int | str | None]] = str.maketrans(
     {"ё": "е", "Ё": "Е"}
 )
 
+# Параметры ключей кэша
+CACHE_KEY_SIZE: Final[int] = 32
+CACHE_LENGTH_BYTES: Final[int] = 8
+
 # Размер и перекрытие текстовых фрагментов
 CHUNK_SIZE: Final[int] = 150
 CHUNK_OVERLAP: Final[int] = 35
@@ -107,6 +111,19 @@ FUSION_DENSE_MEMORY_WEIGHT: Final[float] = 0.45
 FUSION_LEXICAL_MEMORY_WEIGHT: Final[float] = 0.05
 FUSION_CLASSIFIER_WEIGHT: Final[float] = 0.15
 
+# Параметры устойчивого поиска
+ROBUST_MEMORY_NEIGHBORS: Final[int] = 35
+ROBUST_MEMORY_POWER: Final[float] = 3.5
+ROBUST_MEMORY_THRESHOLD: Final[float] = 0.45
+ROBUST_MEMORY_FREQUENCY_POWER: Final[float] = 0.2
+ROBUST_GATE_START: Final[float] = 0.55
+ROBUST_GATE_WIDTH: Final[float] = 0.25
+ROBUST_DIRECT_WEIGHT: Final[float] = 0.35
+ROBUST_MEMORY_WEIGHT: Final[float] = 0.45
+ROBUST_LEXICAL_MEMORY_WEIGHT: Final[float] = 0.05
+ROBUST_CLASSIFIER_WEIGHT: Final[float] = 0.15
+ROBUST_UNSEEN_SHIFT: Final[float] = 0.275
+
 # Параметры Qwen reranker
 RERANKER_MODEL: Final[str] = "Qwen/Qwen3-Reranker-0.6B"
 RERANKER_REVISION: Final[str] = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
@@ -137,4 +154,9 @@ HIGH_SCORE_RERANKER_WEIGHT: Final[float] = 0.16
 DEFAULT_OUTPUT_FILE: Final[Path] = Path("answer.csv")
 FAST_MODE: Final[str] = "fast"
 HIGH_SCORE_MODE: Final[str] = "high-score"
-RUN_MODES: Final[tuple[str, str]] = (FAST_MODE, HIGH_SCORE_MODE)
+ROBUST_MODE: Final[str] = "robust"
+RUN_MODES: Final[tuple[str, str, str]] = (
+    FAST_MODE,
+    HIGH_SCORE_MODE,
+    ROBUST_MODE,
+)
