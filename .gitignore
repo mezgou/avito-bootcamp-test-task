@@ -1,0 +1,17 @@
+# Directories
+.venv/
+.vscode/
+.idea/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.cache/
+temp/
+data/
+models/
+artifacts/
+
+# Files
+answer.csv
+*.py[cod]
