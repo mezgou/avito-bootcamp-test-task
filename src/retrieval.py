@@ -1,45 +1,36 @@
 import unicodedata
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 from bs4 import BeautifulSoup
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-from config import (
-    ARTICLE_COLUMNS,
-    ARTICLES_FILE,
-    CALIBRATION_COLUMNS,
-    CALIBRATION_FILE,
-    CHUNK_OVERLAP,
-    CHUNK_SIZE,
-    DEFAULT_DATA_DIR,
-    MAX_CHUNK_SIZE,
-    REMOVED_TAGS,
-    TEST_COLUMNS,
-    TEST_FILE,
-    TEXT_TRANSLATION,
-    WHITESPACE_PATTERN,
-)
+import config
+
+type TextAnalyzer = Literal["word", "char_wb"]
 
 
 def normalize_text(value: str) -> str:
     """Приводит текст к единому формату"""
-    normalized = unicodedata.normalize("NFKC", value).translate(TEXT_TRANSLATION)
+    normalized = unicodedata.normalize("NFKC", value).translate(config.TEXT_TRANSLATION)
     normalized = "".join(
         character
         for character in normalized
         if character.isprintable() or character.isspace()
     )
 
-    return WHITESPACE_PATTERN.sub(" ", normalized).strip()
+    return config.WHITESPACE_PATTERN.sub(" ", normalized).strip()
 
 
 def html_to_text(value: str) -> str:
     """Извлекает полезный текст из HTML-разметки статьи"""
     soup = BeautifulSoup(value, "lxml")
 
-    for element in soup.find_all(REMOVED_TAGS):
+    for element in soup.find_all(config.REMOVED_TAGS):
         element.decompose()
 
     for headline in soup.find_all("headline"):
@@ -101,17 +92,22 @@ def _validate_frame(
 
 
 def load_data(
-    data_dir: str | Path = DEFAULT_DATA_DIR,
+    data_dir: str | Path = config.DEFAULT_DATA_DIR,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Загружает и проверяет статьи, calibration и test"""
     directory = Path(data_dir)
-    articles = _read_feather(directory / ARTICLES_FILE)
-    calibration = _read_feather(directory / CALIBRATION_FILE)
-    test = _read_feather(directory / TEST_FILE)
+    articles = _read_feather(directory / config.ARTICLES_FILE)
+    calibration = _read_feather(directory / config.CALIBRATION_FILE)
+    test = _read_feather(directory / config.TEST_FILE)
 
-    _validate_frame(articles, "articles", ARTICLE_COLUMNS, "article_id")
-    _validate_frame(calibration, "calibration", CALIBRATION_COLUMNS, "query_id")
-    _validate_frame(test, "test", TEST_COLUMNS, "query_id")
+    _validate_frame(articles, "articles", config.ARTICLE_COLUMNS, "article_id")
+    _validate_frame(
+        calibration,
+        "calibration",
+        config.CALIBRATION_COLUMNS,
+        "query_id",
+    )
+    _validate_frame(test, "test", config.TEST_COLUMNS, "query_id")
 
     known_article_ids = set(articles["article_id"])
     truth_article_ids = {
@@ -143,11 +139,11 @@ def prepare_articles(articles: pd.DataFrame) -> pd.DataFrame:
 
 def split_text(
     value: str,
-    chunk_size: int = CHUNK_SIZE,
-    overlap: int = CHUNK_OVERLAP,
+    chunk_size: int = config.CHUNK_SIZE,
+    overlap: int = config.CHUNK_OVERLAP,
 ) -> list[str]:
     """Разбивает текст на перекрывающиеся фрагменты"""
-    if not 0 <= overlap < chunk_size <= MAX_CHUNK_SIZE:
+    if not 0 <= overlap < chunk_size <= config.MAX_CHUNK_SIZE:
         raise ValueError("Некорректный размер фрагмента или перекрытия")
 
     words = value.split()
@@ -158,7 +154,7 @@ def split_text(
     start = 0
     step = chunk_size - overlap
 
-    while len(words) - start > MAX_CHUNK_SIZE:
+    while len(words) - start > config.MAX_CHUNK_SIZE:
         chunks.append(" ".join(words[start : start + chunk_size]))
         start += step
 
@@ -169,8 +165,8 @@ def split_text(
 
 def build_article_chunks(
     articles: pd.DataFrame,
-    chunk_size: int = CHUNK_SIZE,
-    overlap: int = CHUNK_OVERLAP,
+    chunk_size: int = config.CHUNK_SIZE,
+    overlap: int = config.CHUNK_OVERLAP,
 ) -> pd.DataFrame:
     """Формирует таблицу фрагментов с привязкой к статьям"""
     records: list[tuple[int, int, str]] = []
@@ -189,3 +185,115 @@ def build_article_chunks(
     )
 
     return chunks.astype({"article_id": "int64", "chunk_id": "int64", "text": "string"})
+
+
+def tfidf_scores(
+    corpus: pd.Series,
+    queries: pd.Series,
+    analyzer: TextAnalyzer,
+    ngram_range: tuple[int, int],
+    min_df: int,
+    sublinear_tf: bool,
+) -> np.ndarray:
+    """Вычисляет TF-IDF сходство запросов и документов"""
+    vectorizer = TfidfVectorizer(
+        analyzer=analyzer,
+        ngram_range=ngram_range,
+        min_df=min_df,
+        sublinear_tf=sublinear_tf,
+        dtype=np.float32,
+        token_pattern=(
+            config.WORD_TOKEN_PATTERN if analyzer == config.WORD_ANALYZER else None
+        ),
+    )
+    corpus_matrix = vectorizer.fit_transform(corpus)
+    query_matrix = vectorizer.transform(queries)
+
+    return (query_matrix @ corpus_matrix.T).toarray()
+
+
+def row_scale(scores: np.ndarray) -> np.ndarray:
+    """Масштабирует оценки каждой строки относительно максимума"""
+    maximum = np.maximum(
+        scores.max(axis=1, keepdims=True),
+        config.SCORE_EPSILON,
+    )
+
+    return scores / maximum
+
+
+def lexical_score_channels(
+    articles: pd.DataFrame,
+    queries: pd.Series,
+) -> dict[str, np.ndarray]:
+    """Строит word и char оценки по текстам и заголовкам"""
+    clean_queries = queries.map(normalize_text)
+
+    body_word = tfidf_scores(
+        articles["clean_body"],
+        clean_queries,
+        config.WORD_ANALYZER,
+        config.WORD_NGRAM_RANGE,
+        config.WORD_MIN_DF,
+        config.WORD_SUBLINEAR_TF,
+    )
+    body_char = tfidf_scores(
+        articles["clean_body"],
+        clean_queries,
+        config.CHAR_ANALYZER,
+        config.CHAR_NGRAM_RANGE,
+        config.BODY_CHAR_MIN_DF,
+        config.CHAR_SUBLINEAR_TF,
+    )
+    title_word = tfidf_scores(
+        articles["clean_title"],
+        clean_queries,
+        config.WORD_ANALYZER,
+        config.WORD_NGRAM_RANGE,
+        config.WORD_MIN_DF,
+        config.WORD_SUBLINEAR_TF,
+    )
+    title_char = tfidf_scores(
+        articles["clean_title"],
+        clean_queries,
+        config.CHAR_ANALYZER,
+        config.CHAR_NGRAM_RANGE,
+        config.TITLE_CHAR_MIN_DF,
+        config.CHAR_SUBLINEAR_TF,
+    )
+
+    return {
+        "body_word": body_word,
+        "body_char": body_char,
+        "title_word": title_word,
+        "title_char": title_char,
+    }
+
+
+def lexical_article_scores(
+    articles: pd.DataFrame,
+    queries: pd.Series,
+) -> np.ndarray:
+    """Строит итоговые lexical оценки статей"""
+    clean_queries = queries.map(normalize_text)
+    scores = tfidf_scores(
+        articles["clean_body"],
+        clean_queries,
+        config.WORD_ANALYZER,
+        config.WORD_NGRAM_RANGE,
+        config.WORD_MIN_DF,
+        config.WORD_SUBLINEAR_TF,
+    )
+
+    return row_scale(scores)
+
+
+def rank_article_ids(
+    scores: np.ndarray,
+    article_ids: np.ndarray,
+    limit: int = config.METRIC_CUTOFF,
+) -> np.ndarray:
+    """Преобразует оценки в ранжированные article_id"""
+    order = np.argsort(-scores, axis=1, kind="stable")[:, :limit]
+
+    return article_ids[order]
