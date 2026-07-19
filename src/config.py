@@ -25,6 +25,10 @@ REMOVED_TAGS: Final[tuple[str, str, str, str]] = (
     "style",
 )
 WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
+LEXICAL_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[a-zа-я0-9]+",
+    re.IGNORECASE,
+)
 TEXT_TRANSLATION: Final[dict[int, int | str | None]] = str.maketrans(
     {"ё": "е", "Ё": "Е"}
 )
@@ -49,3 +53,20 @@ WORD_TOKEN_PATTERN: Final[str] = r"(?u)\b\w\w+\b"
 WORD_SUBLINEAR_TF: Final[bool] = False
 CHAR_SUBLINEAR_TF: Final[bool] = True
 SCORE_EPSILON: Final[float] = 1e-8
+
+# Параметры переноса ответов похожих запросов
+QUERY_WORD_WEIGHT: Final[float] = 0.3
+QUERY_CHAR_WEIGHT: Final[float] = 0.7
+MEMORY_NEIGHBORS: Final[int] = 30
+MEMORY_POWER: Final[float] = 2.0
+MEMORY_THRESHOLD: Final[float] = 0.0
+MEMORY_FREQUENCY_POWER: Final[float] = 0.2
+COOCCURRENCE_WEIGHT: Final[float] = 0.15
+
+# Параметры классификации запросов
+CLASSIFIER_CHAR_WEIGHT: Final[float] = 4.0
+CLASSIFIER_C: Final[float] = 0.3
+CLASSIFIER_MAX_ITERATIONS: Final[int] = 2000
+CLASSIFIER_PRIOR_WEIGHT: Final[float] = 0.1
+OOF_SPLITS: Final[int] = 5
+OOF_SEEDS: Final[tuple[int, int, int]] = (7, 42, 2026)

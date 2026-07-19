@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 from bs4 import BeautifulSoup
+from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import KFold
+from sklearn.multiclass import OneVsRestClassifier
 
 import config
 
@@ -24,6 +28,13 @@ def normalize_text(value: str) -> str:
     )
 
     return config.WHITESPACE_PATTERN.sub(" ", normalized).strip()
+
+
+def normalize_lexical_text(value: str) -> str:
+    """Оставляет в тексте слова и числа для lexical поиска"""
+    normalized = value.lower().translate(config.TEXT_TRANSLATION)
+
+    return " ".join(config.LEXICAL_TOKEN_PATTERN.findall(normalized))
 
 
 def html_to_text(value: str) -> str:
@@ -297,3 +308,239 @@ def rank_article_ids(
     order = np.argsort(-scores, axis=1, kind="stable")[:, :limit]
 
     return article_ids[order]
+
+
+def build_label_matrix(
+    ground_truth: pd.Series,
+    article_ids: np.ndarray,
+) -> np.ndarray:
+    """Строит матрицу релевантности запросов и статей"""
+    positions = {
+        int(article_id): position for position, article_id in enumerate(article_ids)
+    }
+    labels = np.zeros((len(ground_truth), len(article_ids)), dtype=np.float32)
+
+    for row, value in enumerate(ground_truth):
+        for article_id in parse_ground_truth(value):
+            labels[row, positions[article_id]] = 1.0
+
+    return labels
+
+
+def lexical_query_similarity(
+    reference_queries: pd.Series,
+    target_queries: pd.Series | None = None,
+) -> np.ndarray:
+    """Сравнивает запросы по словам и символьным фрагментам"""
+    references = reference_queries.map(normalize_lexical_text)
+    targets = (
+        references
+        if target_queries is None
+        else target_queries.map(normalize_lexical_text)
+    )
+
+    word_vectorizer = TfidfVectorizer(
+        ngram_range=config.WORD_NGRAM_RANGE,
+        min_df=config.WORD_MIN_DF,
+        sublinear_tf=True,
+        dtype=np.float32,
+        token_pattern=config.WORD_TOKEN_PATTERN,
+    )
+    char_vectorizer = TfidfVectorizer(
+        analyzer=config.CHAR_ANALYZER,
+        ngram_range=config.CHAR_NGRAM_RANGE,
+        min_df=config.TITLE_CHAR_MIN_DF,
+        sublinear_tf=True,
+        dtype=np.float32,
+    )
+    word_references = word_vectorizer.fit_transform(references)
+    char_references = char_vectorizer.fit_transform(references)
+    word_scores = word_vectorizer.transform(targets) @ word_references.T
+    char_scores = char_vectorizer.transform(targets) @ char_references.T
+    similarity = (
+        config.QUERY_WORD_WEIGHT * word_scores.toarray()
+        + config.QUERY_CHAR_WEIGHT * char_scores.toarray()
+    )
+
+    if target_queries is None:
+        np.fill_diagonal(similarity, 0.0)
+
+    return similarity
+
+
+def memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+    train_rows: np.ndarray,
+    target_rows: np.ndarray,
+    neighbors: int = config.MEMORY_NEIGHBORS,
+    power: float = config.MEMORY_POWER,
+    threshold: float = config.MEMORY_THRESHOLD,
+    frequency_power: float = config.MEMORY_FREQUENCY_POWER,
+) -> np.ndarray:
+    """Переносит ответы от ближайших размеченных запросов"""
+    current = similarity[np.ix_(target_rows, train_rows)]
+    count = min(neighbors, len(train_rows))
+    positions = np.argpartition(-current, count - 1, axis=1)[:, :count]
+    neighbor_scores = np.take_along_axis(current, positions, axis=1)
+    weights = np.maximum(neighbor_scores - threshold, 0.0) ** power
+    neighbor_labels = labels[train_rows[positions]]
+    scores = np.einsum("ij,ijk->ik", weights, neighbor_labels)
+    frequencies = labels[train_rows].sum(axis=0)
+    scores /= np.maximum(frequencies, 1.0) ** frequency_power
+
+    return row_scale(scores)
+
+
+def cooccurrence_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+    train_rows: np.ndarray,
+    target_rows: np.ndarray,
+) -> np.ndarray:
+    """Расширяет перенесённые ответы совместно встречающимися статьями"""
+    base = memory_scores(similarity, labels, train_rows, target_rows)
+    frequencies = labels[train_rows].sum(axis=0)
+    cooccurrence = labels[train_rows].T @ labels[train_rows]
+    np.fill_diagonal(cooccurrence, 0.0)
+
+    denominator = np.sqrt(np.outer(frequencies, frequencies))
+    cosine = cooccurrence / np.maximum(denominator, config.SCORE_EPSILON)
+    expansion = row_scale(base @ cosine)
+
+    return row_scale(base + config.COOCCURRENCE_WEIGHT * expansion)
+
+
+def leave_one_out_memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+) -> np.ndarray:
+    """Вычисляет query memory со строгим исключением текущего запроса"""
+    scores = np.zeros_like(labels)
+    all_rows = np.arange(len(labels))
+
+    for row in all_rows:
+        train_rows = np.delete(all_rows, row)
+        scores[row] = cooccurrence_scores(
+            similarity,
+            labels,
+            train_rows,
+            np.array([row]),
+        )[0]
+
+    return scores
+
+
+def fold_memory_scores(
+    similarity: np.ndarray,
+    labels: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Вычисляет query memory по разбиениям без пересечения"""
+    scores = np.zeros_like(labels)
+    splitter = KFold(
+        n_splits=config.OOF_SPLITS,
+        shuffle=True,
+        random_state=seed,
+    )
+
+    for train_rows, target_rows in splitter.split(labels):
+        scores[target_rows] = cooccurrence_scores(
+            similarity,
+            labels,
+            train_rows,
+            target_rows,
+        )
+
+    return scores
+
+
+def _query_features(
+    train_queries: pd.Series,
+    target_queries: pd.Series,
+) -> tuple[csr_matrix, csr_matrix]:
+    """Строит word и char признаки для классификатора"""
+    word_vectorizer = TfidfVectorizer(
+        ngram_range=config.WORD_NGRAM_RANGE,
+        min_df=config.WORD_MIN_DF,
+        sublinear_tf=True,
+        dtype=np.float32,
+        token_pattern=config.WORD_TOKEN_PATTERN,
+    )
+    char_vectorizer = TfidfVectorizer(
+        analyzer=config.CHAR_ANALYZER,
+        ngram_range=config.CHAR_NGRAM_RANGE,
+        min_df=config.BODY_CHAR_MIN_DF,
+        sublinear_tf=True,
+        dtype=np.float32,
+    )
+    train_word = word_vectorizer.fit_transform(train_queries)
+    train_char = char_vectorizer.fit_transform(train_queries)
+    target_word = word_vectorizer.transform(target_queries)
+    target_char = char_vectorizer.transform(target_queries)
+    train_features = hstack(
+        [train_word, config.CLASSIFIER_CHAR_WEIGHT * train_char],
+        format="csr",
+    )
+    target_features = hstack(
+        [target_word, config.CLASSIFIER_CHAR_WEIGHT * target_char],
+        format="csr",
+    )
+
+    return train_features, target_features
+
+
+def logistic_query_scores(
+    train_queries: pd.Series,
+    target_queries: pd.Series,
+    train_labels: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Оценивает статьи независимыми логистическими классификаторами"""
+    clean_train = train_queries.map(normalize_lexical_text)
+    clean_target = target_queries.map(normalize_lexical_text)
+    train_features, target_features = _query_features(clean_train, clean_target)
+    seen = train_labels.sum(axis=0) > 0
+    model = OneVsRestClassifier(
+        LogisticRegression(
+            C=config.CLASSIFIER_C,
+            class_weight="balanced",
+            solver="liblinear",
+            max_iter=config.CLASSIFIER_MAX_ITERATIONS,
+            random_state=seed,
+        )
+    )
+    model.fit(train_features, train_labels[:, seen])
+    probabilities = model.predict_proba(target_features)
+    frequencies = train_labels[:, seen].sum(axis=0)
+    prior = frequencies / max(float(frequencies.max()), 1.0)
+    scores = np.zeros((len(target_queries), train_labels.shape[1]), dtype=np.float32)
+    scores[:, seen] = row_scale(
+        row_scale(probabilities) + config.CLASSIFIER_PRIOR_WEIGHT * prior
+    )
+
+    return scores
+
+
+def logistic_oof_scores(
+    queries: pd.Series,
+    labels: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Вычисляет OOF-оценки логистической классификации"""
+    scores = np.zeros_like(labels)
+    splitter = KFold(
+        n_splits=config.OOF_SPLITS,
+        shuffle=True,
+        random_state=seed,
+    )
+
+    for train_rows, target_rows in splitter.split(labels):
+        scores[target_rows] = logistic_query_scores(
+            queries.iloc[train_rows],
+            queries.iloc[target_rows],
+            labels[train_rows],
+            seed,
+        )
+
+    return scores
