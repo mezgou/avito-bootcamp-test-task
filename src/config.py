@@ -75,6 +75,9 @@ OOF_SEEDS: Final[tuple[int, int, int]] = (7, 42, 2026)
 EMBEDDING_MODEL: Final[str] = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_REVISION: Final[str] = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 EMBEDDING_ARTIFACT: Final[Path] = Path("artifacts/qwen3_calibration_embeddings.npz")
+SUBMISSION_EMBEDDING_ARTIFACT: Final[Path] = Path(
+    "artifacts/qwen3_submission_embeddings.npz"
+)
 MODEL_CACHE_DIR: Final[Path] = Path("models")
 EMBEDDING_BATCH_SIZE: Final[int] = 4
 EMBEDDING_MAX_LENGTH: Final[int] = 512
@@ -108,6 +111,9 @@ FUSION_CLASSIFIER_WEIGHT: Final[float] = 0.15
 RERANKER_MODEL: Final[str] = "Qwen/Qwen3-Reranker-0.6B"
 RERANKER_REVISION: Final[str] = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
 RERANKER_ARTIFACT: Final[Path] = Path("artifacts/qwen3_reranker_calibration.npz")
+SUBMISSION_RERANKER_ARTIFACT: Final[Path] = Path(
+    "artifacts/qwen3_reranker_submission.npz"
+)
 RERANKER_BATCH_SIZE: Final[int] = 16
 RERANKER_MAX_LENGTH: Final[int] = 256
 RERANKER_CANDIDATES: Final[int] = 15
@@ -126,3 +132,9 @@ CHUNK_WORD_WEIGHT: Final[float] = 0.4
 CHUNK_CHAR_WEIGHT: Final[float] = 0.6
 HIGH_SCORE_BASE_WEIGHT: Final[float] = 0.84
 HIGH_SCORE_RERANKER_WEIGHT: Final[float] = 0.16
+
+# Параметры запуска и результата
+DEFAULT_OUTPUT_FILE: Final[Path] = Path("answer.csv")
+FAST_MODE: Final[str] = "fast"
+HIGH_SCORE_MODE: Final[str] = "high-score"
+RUN_MODES: Final[tuple[str, str]] = (FAST_MODE, HIGH_SCORE_MODE)
