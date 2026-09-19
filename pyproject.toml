@@ -1,0 +1,10 @@
+[project]
+name = "avito-bootcamp-test-task"
+version = "1.0.0"
+description = "Avito Bootcamp Test Task | Computer Vision"
+readme = "README.md"
+authors = [
+    { name = "mezgou", email = "mezgou237@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
