@@ -1,0 +1,61 @@
+{
+  "weights": "/home/user-21/projects/avito-bootcamp-final/outputs/finetune_20260920_175555_827888/best.pdparams",
+  "weights_sha256": "ccf2a0cb194cc03b0801aab63fe46cd832bfa6641169ae3b330baabfc58062ba",
+  "variant": "rotation",
+  "variant_formula": "(p(x) + 1 - p(rot180(x))) / 2",
+  "temperature": 1.1390818601472776,
+  "temperature_stage": "after_variant_probability",
+  "preprocessing": "RGB, rotation before resize, 160x80, ImageNet, FP32",
+  "calibration_path": "/home/user-21/projects/avito-bootcamp-final/outputs/calibration/finetuned_rotation.json",
+  "calibration": {
+    "method": "temperature",
+    "variant": "rotation",
+    "variant_formula": "(p(x) + 1 - p(rot180(x))) / 2",
+    "apply_to": "variant_probability",
+    "formula": "sigmoid(logit(p) / temperature)",
+    "fit_split": "calibration",
+    "fit_source": "real",
+    "criterion": "brier",
+    "weights": "/home/user-21/projects/avito-bootcamp-final/outputs/finetune_20260920_175555_827888/best.pdparams",
+    "weights_sha256": "ccf2a0cb194cc03b0801aab63fe46cd832bfa6641169ae3b330baabfc58062ba",
+    "manifest_sha256": "ea3006f74a57d03a5a0003c4b45b83046c1b9a2ef2e8bb42988f628bf58f6e39",
+    "preprocessing": "RGB, rotation before resize, 160x80, ImageNet, FP32",
+    "crops": 6843,
+    "evaluation": "/home/user-21/projects/avito-bootcamp-final/outputs/evaluation/finetuned_calibration",
+    "input_sha256": {
+      "predictions.csv.gz": "b9592cf04130b72820f0e5e4f3944cc2bc404472b33343c3a95d1aaf22772016",
+      "report.json": "6de7d02c10fb65a1a349f183e422b912c7815ec95847b02f3c0222735903e078"
+    },
+    "temperature": 1.1390818601472776,
+    "bounds": [
+      0.25,
+      4.0
+    ],
+    "grid_points": 81,
+    "at_bound": false,
+    "before": {
+      "n": 13686,
+      "brier": 0.022580394312684063,
+      "score": 0.9774196056873159,
+      "log_loss": 0.07515600012586238,
+      "accuracy": 0.9690194359199181
+    },
+    "after": {
+      "n": 13686,
+      "brier": 0.02252003436756762,
+      "score": 0.9774799656324323,
+      "log_loss": 0.07430421678269589,
+      "accuracy": 0.9690194359199181
+    },
+    "brier_improvement": 6.0359945116442854e-05
+  },
+  "sample": "/home/user-21/projects/avito-bootcamp-final/data/test/sample_submission.csv",
+  "sample_sha256": "60f977337a780a64d588d1ee1051ea85b93ed6ffb7c577e7efdcf350b1a8ef88",
+  "output": "/home/user-21/projects/avito-bootcamp-final/outputs/submission_calibrated.csv",
+  "output_sha256": "1b625c7ac0ecd657ac5fff09728c226921e05914f3d7dedb5fc97127aa4692e1",
+  "rows": 20000,
+  "device": "gpu:0",
+  "batch_size": 256,
+  "read_workers": 8,
+  "png_to_csv_seconds": 17.357
+}

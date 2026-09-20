@@ -6,5 +6,34 @@ readme = "README.md"
 authors = [
     { name = "mezgou", email = "mezgou237@gmail.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "ipykernel>=7.3.0",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+    "opencv-python-headless>=5.0.0.93",
+    "pandas>=3.0.6",
+    "pillow>=12.3.0",
+    "pyyaml>=6.0.3",
+    "scipy>=1.18.1",
+    "tqdm>=4.70.1",
+]
+
+[project.optional-dependencies]
+cpu = ["paddlepaddle==3.3.1"]
+gpu = ["paddlepaddle-gpu==3.3.1"]
+
+[tool.uv]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "gpu" }],
+]
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddle-cu126" }
+
+[[tool.uv.index]]
+name = "paddle-cu126"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+explicit = true

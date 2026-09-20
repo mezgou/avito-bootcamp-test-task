@@ -1,0 +1,12 @@
+{
+  "manifest": "data/external/manifest.csv",
+  "test_dir": "data/test",
+  "weights": null,
+  "output": "outputs/submission_finetuned.csv",
+  "epochs": 6,
+  "batch_size": 256,
+  "lr": 0.001,
+  "read_workers": 8,
+  "device": "gpu:0",
+  "initial_weights": "weights/pretrained.pdparams"
+}

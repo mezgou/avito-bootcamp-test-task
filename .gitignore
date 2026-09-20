@@ -1,2 +1,49 @@
-# Directories
+# Environment
+.env
 .venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Generated data
+data/cache/
+data/external/
+data/fonts/
+
+# Downloadable source weights
+weights/
+
+# Runtime logs and temporary archives
+logs/
+submission_context.tar.gz
+current_code.tar.gz
+
+# Generated outputs. Keep only the artifacts required to reproduce and audit
+# the submitted calibrated solution.
+outputs/**
+!outputs/
+!outputs/submission_calibrated.csv
+!outputs/submission_calibrated.json
+!outputs/calibration/
+!outputs/calibration/finetuned_rotation.json
+!outputs/finetune_20260920_175555_827888/
+!outputs/finetune_20260920_175555_827888/best.pdparams
+!outputs/finetune_20260920_175555_827888/best.json
+!outputs/finetune_20260920_175555_827888/config.json
+!outputs/finetune_20260920_175555_827888/history.json
+!outputs/evaluation/
+!outputs/evaluation/pretrained_development/
+!outputs/evaluation/pretrained_development/metrics.csv
+!outputs/evaluation/pretrained_development/report.json
+!outputs/evaluation/finetuned_development/
+!outputs/evaluation/finetuned_development/metrics.csv
+!outputs/evaluation/finetuned_development/report.json
+!outputs/evaluation/finetuned_calibration/
+!outputs/evaluation/finetuned_calibration/metrics.csv
+!outputs/evaluation/finetuned_calibration/report.json
+!outputs/evaluation/finetuned_holdout/
+!outputs/evaluation/finetuned_holdout/metrics.csv
+!outputs/evaluation/finetuned_holdout/report.json

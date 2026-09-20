@@ -1,0 +1,8 @@
+{
+  "epoch": 4,
+  "train_loss": 0.03804421043616351,
+  "development_loss": 0.0790392221228215,
+  "development_accuracy": 0.9670859538784067,
+  "seconds_before_submission": 41.84,
+  "submission": "outputs/submission_finetuned.csv"
+}

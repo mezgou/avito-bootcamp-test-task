@@ -1,0 +1,69 @@
+{
+  "weights": "/home/user-21/projects/avito-bootcamp-final/outputs/finetune_20260920_175555_827888/best.pdparams",
+  "weights_sha256": "ccf2a0cb194cc03b0801aab63fe46cd832bfa6641169ae3b330baabfc58062ba",
+  "manifest": "/home/user-21/projects/avito-bootcamp-final/data/external/manifest.csv",
+  "manifest_sha256": "ea3006f74a57d03a5a0003c4b45b83046c1b9a2ef2e8bb42988f628bf58f6e39",
+  "split": "development",
+  "device": "gpu:0",
+  "batch_size": 256,
+  "read_workers": 8,
+  "crops": 7155,
+  "examples_per_variant": 14310,
+  "labels": {
+    "0": "upright",
+    "1": "rotated_180"
+  },
+  "variants": {
+    "single": "p(x)",
+    "rotation": "(p(x) + 1 - p(rot180(x))) / 2"
+  },
+  "preprocessing": "RGB, rotation before resize, 160x80, ImageNet, FP32",
+  "temperature": 1.0,
+  "elapsed_seconds": 6.52,
+  "metrics": [
+    {
+      "split": "development",
+      "source": "real",
+      "variant": "rotation",
+      "crops": 6759,
+      "n": 13518,
+      "brier": 0.020775802667482645,
+      "score": 0.9792241973325173,
+      "log_loss": 0.06856364258348563,
+      "accuracy": 0.972924988903684
+    },
+    {
+      "split": "development",
+      "source": "real",
+      "variant": "single",
+      "crops": 6759,
+      "n": 13518,
+      "brier": 0.02472064315444023,
+      "score": 0.9752793568455598,
+      "log_loss": 0.08206774596411594,
+      "accuracy": 0.965601420328451
+    },
+    {
+      "split": "development",
+      "source": "synthetic",
+      "variant": "rotation",
+      "crops": 396,
+      "n": 792,
+      "brier": 0.005592318123285659,
+      "score": 0.9944076818767144,
+      "log_loss": 0.019098569333289434,
+      "accuracy": 0.98989898989899
+    },
+    {
+      "split": "development",
+      "source": "synthetic",
+      "variant": "single",
+      "crops": 396,
+      "n": 792,
+      "brier": 0.007178786569968466,
+      "score": 0.9928212134300315,
+      "log_loss": 0.027347863096803513,
+      "accuracy": 0.9924242424242424
+    }
+  ]
+}
